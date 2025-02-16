@@ -6,6 +6,7 @@ import instaloader
 import os
 from dotenv import load_dotenv
 import time
+import random
 
 # Load environment variables
 load_dotenv()
@@ -18,7 +19,14 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Create an instance of Instaloader with anonymous session
+# List of user agents to rotate
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Mobile/15E148 Safari/604.1'
+]
+
+# Create an instance of Instaloader with custom settings
 loader = instaloader.Instaloader(
     download_videos=True,
     download_video_thumbnails=False,
@@ -26,9 +34,17 @@ loader = instaloader.Instaloader(
     download_comments=False,
     save_metadata=False,
     compress_json=False,
-    download_pictures=False,  # Skip pictures
-    post_metadata_txt_pattern=''  # Skip creating metadata files
+    download_pictures=False,
+    post_metadata_txt_pattern='',
+    max_connection_attempts=3,
+    user_agent=random.choice(USER_AGENTS),
+    request_timeout=30
 )
+
+def create_new_session():
+    """Create a new session with rotating user agent"""
+    loader.context._session.headers['User-Agent'] = random.choice(USER_AGENTS)
+    time.sleep(2)  # Add delay between session creations
 
 def start(update: Update, context: CallbackContext) -> None:
     """Send a message when the command /start is issued."""
@@ -62,28 +78,33 @@ def download_video(update: Update, context: CallbackContext) -> None:
         # Extract the shortcode from the URL
         shortcode = extract_shortcode(url)
         
-        # Download the post with rate limiting
-        try:
-            post = instaloader.Post.from_shortcode(loader.context, shortcode)
-            if not post.is_video:
-                update.message.reply_text('❌ This post does not contain a video.')
-                return
-                
-            # Add delay to avoid rate limiting
-            time.sleep(2)
-            loader.download_post(post, target=download_dir)
-            
-        except instaloader.exceptions.InstaloaderException as e:
-            if 'rate-limited' in str(e).lower():
-                update.message.reply_text('⚠️ Rate limited by Instagram. Please try again in a few minutes.')
-                return
-            raise e
+        # Create new session for this request
+        create_new_session()
         
-        # Find the video file
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                post = instaloader.Post.from_shortcode(loader.context, shortcode)
+                if not post.is_video:
+                    update.message.reply_text('❌ This post does not contain a video.')
+                    return
+                
+                time.sleep(2)  # Rate limiting delay
+                loader.download_post(post, target=download_dir)
+                break
+            except instaloader.exceptions.InstaloaderException as e:
+                if 'rate-limited' in str(e).lower() and attempt < max_retries - 1:
+                    time.sleep(5 * (attempt + 1))  # Exponential backoff
+                    create_new_session()  # Try with new session
+                    continue
+                raise e
+        
+        # Find and send the video file
+        video_found = False
         for file in os.listdir(download_dir):
             if file.endswith('.mp4'):
+                video_found = True
                 video_path = os.path.join(download_dir, file)
-                # Send the video
                 try:
                     with open(video_path, 'rb') as video:
                         update.message.reply_video(
@@ -92,11 +113,14 @@ def download_video(update: Update, context: CallbackContext) -> None:
                         )
                 except Exception as e:
                     update.message.reply_text('❌ Video file too large to send via Telegram.')
-                # Clean up
-                os.remove(video_path)
+                finally:
+                    os.remove(video_path)
                 break
         
-        # Clean up other files
+        if not video_found:
+            update.message.reply_text('❌ No video found in the post.')
+        
+        # Clean up directory
         for file in os.listdir(download_dir):
             file_path = os.path.join(download_dir, file)
             try:
@@ -117,6 +141,7 @@ def download_video(update: Update, context: CallbackContext) -> None:
                 f'2. The post is public\n'
                 f'3. The post contains a video'
             )
+        logger.error(f"Instagram error: {str(e)}")
     except Exception as e:
         logger.error(f"Error processing request: {e}")
         update.message.reply_text(
