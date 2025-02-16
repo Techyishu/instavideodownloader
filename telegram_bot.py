@@ -18,8 +18,17 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Create an instance of Instaloader
-loader = instaloader.Instaloader()
+# Create an instance of Instaloader with anonymous session
+loader = instaloader.Instaloader(
+    download_videos=True,
+    download_video_thumbnails=False,
+    download_geotags=False,
+    download_comments=False,
+    save_metadata=False,
+    compress_json=False,
+    download_pictures=False,  # Skip pictures
+    post_metadata_txt_pattern=''  # Skip creating metadata files
+)
 
 def start(update: Update, context: CallbackContext) -> None:
     """Send a message when the command /start is issued."""
@@ -53,20 +62,36 @@ def download_video(update: Update, context: CallbackContext) -> None:
         # Extract the shortcode from the URL
         shortcode = extract_shortcode(url)
         
-        # Download the post
-        post = instaloader.Post.from_shortcode(loader.context, shortcode)
-        loader.download_post(post, target=download_dir)
+        # Download the post with rate limiting
+        try:
+            post = instaloader.Post.from_shortcode(loader.context, shortcode)
+            if not post.is_video:
+                update.message.reply_text('❌ This post does not contain a video.')
+                return
+                
+            # Add delay to avoid rate limiting
+            time.sleep(2)
+            loader.download_post(post, target=download_dir)
+            
+        except instaloader.exceptions.InstaloaderException as e:
+            if 'rate-limited' in str(e).lower():
+                update.message.reply_text('⚠️ Rate limited by Instagram. Please try again in a few minutes.')
+                return
+            raise e
         
         # Find the video file
         for file in os.listdir(download_dir):
             if file.endswith('.mp4'):
                 video_path = os.path.join(download_dir, file)
                 # Send the video
-                with open(video_path, 'rb') as video:
-                    update.message.reply_video(
-                        video=video,
-                        caption='✅ Here\'s your video!'
-                    )
+                try:
+                    with open(video_path, 'rb') as video:
+                        update.message.reply_video(
+                            video=video,
+                            caption='✅ Here\'s your video!'
+                        )
+                except Exception as e:
+                    update.message.reply_text('❌ Video file too large to send via Telegram.')
                 # Clean up
                 os.remove(video_path)
                 break
@@ -80,13 +105,18 @@ def download_video(update: Update, context: CallbackContext) -> None:
                 logger.error(f"Error removing file {file_path}: {e}")
                 
     except instaloader.exceptions.InstaloaderException as e:
-        update.message.reply_text(
-            f'❌ Error: Could not download the video. Make sure:\n'
-            f'1. The link is valid\n'
-            f'2. The post is public\n'
-            f'3. The post contains a video\n\n'
-            f'Technical details: {str(e)}'
-        )
+        error_message = str(e).lower()
+        if 'not found' in error_message:
+            update.message.reply_text('❌ Post not found. Make sure the link is valid.')
+        elif 'private' in error_message:
+            update.message.reply_text('❌ This is a private post. I can only download public posts.')
+        else:
+            update.message.reply_text(
+                f'❌ Error: Could not download the video. Make sure:\n'
+                f'1. The link is valid\n'
+                f'2. The post is public\n'
+                f'3. The post contains a video'
+            )
     except Exception as e:
         logger.error(f"Error processing request: {e}")
         update.message.reply_text(
@@ -95,51 +125,28 @@ def download_video(update: Update, context: CallbackContext) -> None:
 
 def main() -> None:
     """Start the bot."""
-    while True:
-        try:
-            # Get token from environment variable
-            bot_token = os.getenv('BOT_TOKEN')
-            if not bot_token:
-                raise ValueError("No BOT_TOKEN found in environment variables")
-            
-            # Create the Updater and pass it your bot's token
-            updater = Updater(bot_token)
+    # Create the Updater and pass it your bot's token
+    updater = Updater(os.getenv('BOT_TOKEN'))
 
-            # Get the dispatcher to register handlers
-            dispatcher = updater.dispatcher
+    # Get the dispatcher to register handlers
+    dispatcher = updater.dispatcher
 
-            # Register handlers
-            dispatcher.add_handler(CommandHandler("start", start))
-            dispatcher.add_handler(MessageHandler(
-                Filters.text & ~Filters.command, 
-                download_video
-            ))
+    # Register handlers
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(MessageHandler(
+        Filters.text & ~Filters.command, 
+        download_video
+    ))
 
-            # Add error handler
-            dispatcher.add_error_handler(error_callback)
+    # Add error handler
+    dispatcher.add_error_handler(error_callback)
 
-            # Start the Bot
-            updater.start_polling(drop_pending_updates=True)
-            logger.info("Bot started successfully!")
+    # Start the Bot
+    updater.start_polling(drop_pending_updates=True)
+    logger.info("Bot started successfully!")
 
-            # Run the bot until you send a signal to stop
-            updater.idle()
-            break  # If we get here, the bot was stopped cleanly
-            
-        except Conflict as e:
-            logger.error(f"Conflict error: {e}")
-            logger.info("Waiting for other instance to release the bot...")
-            time.sleep(10)  # Wait before retrying
-            continue
-            
-        except NetworkError as e:
-            logger.error(f"Network error: {e}")
-            time.sleep(5)  # Wait before retrying
-            continue
-            
-        except Exception as e:
-            logger.error(f"Critical error: {str(e)}")
-            raise e
+    # Run the bot until you send a signal to stop
+    updater.idle()
 
 def error_callback(update: Update, context: CallbackContext) -> None:
     """Error handler function"""
