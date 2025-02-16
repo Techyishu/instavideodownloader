@@ -1,9 +1,11 @@
 import logging
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.error import Conflict, NetworkError
 import instaloader
 import os
 from dotenv import load_dotenv
+import time
 
 # Load environment variables
 load_dotenv()
@@ -93,35 +95,62 @@ def download_video(update: Update, context: CallbackContext) -> None:
 
 def main() -> None:
     """Start the bot."""
+    while True:
+        try:
+            # Get token from environment variable
+            bot_token = os.getenv('BOT_TOKEN')
+            if not bot_token:
+                raise ValueError("No BOT_TOKEN found in environment variables")
+            
+            # Create the Updater and pass it your bot's token
+            updater = Updater(bot_token)
+
+            # Get the dispatcher to register handlers
+            dispatcher = updater.dispatcher
+
+            # Register handlers
+            dispatcher.add_handler(CommandHandler("start", start))
+            dispatcher.add_handler(MessageHandler(
+                Filters.text & ~Filters.command, 
+                download_video
+            ))
+
+            # Add error handler
+            dispatcher.add_error_handler(error_callback)
+
+            # Start the Bot
+            updater.start_polling(drop_pending_updates=True)
+            logger.info("Bot started successfully!")
+
+            # Run the bot until you send a signal to stop
+            updater.idle()
+            break  # If we get here, the bot was stopped cleanly
+            
+        except Conflict as e:
+            logger.error(f"Conflict error: {e}")
+            logger.info("Waiting for other instance to release the bot...")
+            time.sleep(10)  # Wait before retrying
+            continue
+            
+        except NetworkError as e:
+            logger.error(f"Network error: {e}")
+            time.sleep(5)  # Wait before retrying
+            continue
+            
+        except Exception as e:
+            logger.error(f"Critical error: {str(e)}")
+            raise e
+
+def error_callback(update: Update, context: CallbackContext) -> None:
+    """Error handler function"""
     try:
-        # Get token from environment variable
-        bot_token = os.getenv('BOT_TOKEN')
-        if not bot_token:
-            raise ValueError("No BOT_TOKEN found in environment variables")
-        
-        # Create the Updater and pass it your bot's token
-        updater = Updater(bot_token)
-
-        # Get the dispatcher to register handlers
-        dispatcher = updater.dispatcher
-
-        # Register handlers
-        dispatcher.add_handler(CommandHandler("start", start))
-        dispatcher.add_handler(MessageHandler(
-            Filters.text & ~Filters.command, 
-            download_video
-        ))
-
-        # Start the Bot
-        updater.start_polling()
-        logger.info("Bot started successfully!")
-
-        # Run the bot until you send a signal to stop
-        updater.idle()
-        
+        raise context.error
+    except Conflict:
+        logger.warning('Conflict error - another instance is running')
+    except NetworkError:
+        logger.warning('Network error occurred')
     except Exception as e:
-        logger.error(f"Critical error: {str(e)}")
-        raise e
+        logger.error(f'Update "{update}" caused error "{context.error}"')
 
 if __name__ == '__main__':
     main() 

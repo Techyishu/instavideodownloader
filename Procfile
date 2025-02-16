@@ -1,1 +1,1 @@
-worker: python telegram_bot.py 
+worker: pkill -f telegram_bot.py || true && python telegram_bot.py 
